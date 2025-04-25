@@ -1,15 +1,13 @@
-# ===== CORE =====
-ultralytics==8.3.116          # YOLOv8-OBB engine :contentReference[oaicite:0]{index=0}
-torch==2.7.0                  # deep-learning backend (CPU/GPU) :contentReference[oaicite:1]{index=1}
-torchvision==0.22.0           # vision utils / transforms :contentReference[oaicite:2]{index=2}
-opencv-python==4.11.0.86      # computer-vision utilities & GUI :contentReference[oaicite:3]{index=3}
-numpy==2.2.5                  # array maths (OpenCV & Torch depend on it) :contentReference[oaicite:4]{index=4}
-pillow==11.2.1                # image I/O for cv2.imshow fallback, etc. :contentReference[oaicite:5]{index=5}
+# Core deep-learning stack (YOLOv8 + PyTorch)
+ultralytics==8.3.116          # YOLO v8 wrapper – pulls in torch, torchvision, Pillow, etc.
+torch==2.7.0                  # Explicit pin for GPU / CPU wheel selection
 
-# ===== OPTIONAL HARDWARE SUPPORT =====
-djitellopy==2.5.0             # DJI Tello drone SDK (skip if no drone) :contentReference[oaicite:6]{index=6}
-tflite-runtime==2.14.0        # Raspberry Pi / Edge TPU inference (comment out on x86)
+# Computer-vision utilities
+opencv-python==4.11.0.86      # cv2, with GUI support for cv2.imshow
+numpy>=1.23,<2.0              # maths backbone (loose pin for easier environment upgrades)
 
-# ===== DATA HANDLING =====
-datasets==3.5.0               # Hugging Face datasets loader :contentReference[oaicite:7]{index=7}
-pyarrow==19.0.1               # columnar storage backend required by ‘datasets’ :contentReference[oaicite:8]{index=8}
+# Dataset management
+datasets==3.5.0               # Hugging Face Datasets (VisDrone subset load)
+
+# Optional – needed only if you fly a DJI Tello
+djitellopy==2.5.0             # Python SDK for DJI Tello drones
