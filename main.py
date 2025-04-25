@@ -1,116 +1,146 @@
+#!/usr/bin/env python3
 # ===== AUTONOMOUS DRONE THREAT DETECTION =====
-# Purpose: Detect military targets (tanks, ships, helicopters) in aerial imagery using YOLOv8-OBB
-# Hardware: Works with DJI Tello drone or Raspberry Pi + Pi Camera
-# Dataset: DOTA v2.0 (preprocessed for YOLO-OBB format)
-# Dataset: Hugging Face dataset integration for demo purposes
+# Purpose : Detect potential military targets (tanks, ships, helicopters) in aerial imagery.
+# Hardware: DJI Tello drone *or* any OpenCV-compatible camera (e.g., Raspberry Pi Cam).
+# Dataset : DOTA v2.0 (model pre-trained), VisDrone sample for quick demo.
+# Notes   : Uses YOLOv8-OBB (oriented bounding boxes) from Ultralytics.
 
-
+import argparse
+import sys
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from djitellopy import Tello  # For drone control (optional)
 from datasets import load_dataset
 
-# ===== 1. INITIALIZATION =====
-def initialize_models():
-    """Load pre-trained YOLOv8-OBB model (pre-trained on DOTA)"""
-    model = YOLO('yolov8n-obb.pt')  # Nano version for edge devices
-    print("[STATUS] Model loaded. Classes:", model.names)
+# Tello is optional; import lazily so the script also works without the SDK installed.
+try:
+    from djitellopy import Tello
+except ImportError:
+    Tello = None
+
+# ───────────────────────── 1. INITIALIZATION ──────────────────────────
+def initialize_model(weights="yolov8n-obb.pt"):
+    """Load a pre-trained YOLOv8-OBB model."""
+    model = YOLO(weights)
+    print(f"[STATUS] Model loaded ({weights}). Classes: {model.names}")
     return model
 
-# ===== 2A. FOR REAL: REAL-TIME INFERENCE =====
+# ──────────────────────── 2A. REAL-TIME INFERENCE ─────────────────────
 def run_detection(model, source=0, conf_thresh=0.5):
     """
-    Run inference on live stream (drone/camera)
-    
+    Perform live inference.
     Args:
-        model: YOLOv8-OBB model
-        source: 0 for webcam, 'drone' for Tello, or video path
-        conf_thresh: Confidence threshold (0.25-0.7)
+        model       : YOLOv8-OBB model.
+        source      : 0 / cam path / 'drone'.
+        conf_thresh : Confidence threshold (0–1).
     """
-    # Initialize video source
-    if source == 'drone':
+    # Choose video source
+    drone = None
+    if source == "drone":
+        if Tello is None:
+            print("ERROR: djitellopy not installed; cannot run drone mode.")
+            sys.exit(1)
         drone = Tello()
         drone.connect()
         drone.streamon()
-        cap = drone.get_frame_read()
+        frame_reader = drone.get_frame_read()
     else:
-        cap = cv2.VideoCapture(source)  # 0 for Pi Camera
-    
-    while True:
-        # Get frame
-        if source == 'drone':
-            frame = cap.frame
+        cap = cv2.VideoCapture(source)
+
+    try:
+        while True:
+            # Grab frame
+            if source == "drone":
+                frame = frame_reader.frame
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Stream ended or camera not found.")
+                    break
+
+            # Inference
+            results = model(frame, imgsz=640, conf=conf_thresh, verbose=False)
+
+            # Visualize detections
+            annotated = results[0].plot()
+            for box in results[0].obb:          # oriented bounding boxes
+                cls_id = int(box.cls)
+                label = model.names[cls_id]
+                if label in {"helicopter", "tank"}:        # high-priority
+                    cv2.putText(
+                        annotated,
+                        f"ALERT: {label.upper()}",
+                        (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 0, 255),
+                        2,
+                    )
+
+            cv2.imshow("Drone Threat Detection", annotated)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        # Clean up
+        if source == "drone" and drone is not None:
+            drone.streamoff()
+            drone.end()
         else:
-            ret, frame = cap.read()
-            if not ret: break
-        
-        # Run inference (oriented bounding boxes)
-        results = model(frame, imgsz=640, conf=conf_thresh, verbose=False)
-        
-        # Visualize results
-        annotated_frame = results[0].plot()  # Draw rotated boxes
-        
-        # Display threat alerts
-        for box in results[0].obb:
-            class_id = int(box.cls)
-            label = model.names[class_id]
-            if label in ['helicopter', 'tank']:  # High-priority targets
-                cv2.putText(annotated_frame, "ALERT: " + label, (50, 50), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        
-        # Show output
-        cv2.imshow('Drone Threat Detection', annotated_frame)
-        if cv2.waitKey(1) == ord('q'):
-            break
-    
-    if source == 'drone':
-        drone.streamoff()
-    else:
-        cap.release()
-    cv2.destroyAllWindows()
+            cap.release()
+        cv2.destroyAllWindows()
 
-# ===== 2B. FOR REAL: DEPLOYMENT ON RASPBERRY PI =====
+# ─────────────────────── 2B. RASPBERRY PI SHORTCUT ────────────────────
 def pi_deployment():
-    """Optimized version for Raspberry Pi with Pi Camera"""
-    model = YOLO('yolov8n-obb.tflite')  # Quantized TensorFlow Lite model
-    run_detection(model, source=0, conf_thresh=0.6)  # Higher threshold to reduce false positives
+    """One-liner for Raspberry Pi (assuming a quantized TFLite model exists)."""
+    model = initialize_model("yolov8n-obb.tflite")
+    run_detection(model, source=0, conf_thresh=0.6)
 
-# ===== 3A. FOR DEMO: LOAD HUGGING FACE DATASET =====
-def load_hf_dataset():
-    """Load VisDrone dataset from Hugging Face (aerial military-relevant objects)"""
-    dataset = load_dataset("Voxel51/VisDrone2019-DET", split="train[:50]")  # First 50 samples
-    print(f"[STATUS] Loaded {len(dataset)} samples from VisDrone")
-    return dataset
+# ───────────────────── 3A. HUGGING FACE DATASET DEMO ──────────────────
+def load_hf_dataset(num_samples=50):
+    """Pull a small VisDrone subset for a quick desktop demo."""
+    ds = load_dataset("Voxel51/VisDrone2019-DET", split=f"train[:{num_samples}]")
+    print(f"[STATUS] Loaded {len(ds)} samples from VisDrone")
+    return ds
 
-# ===== 3B. DATASET DEMO MODE =====
+# ────────────────────── 3B. DATASET DEMO LOOP ─────────────────────────
 def run_dataset_demo(model, dataset):
-    """Run detection on Hugging Face dataset samples"""
-    for sample in dataset:
-        image = np.array(sample['image'])
-        results = model(image, imgsz=640)
-        
-        # Visualize with annotations
-        annotated = results[0].plot()
-        cv2.imshow('Hugging Face Dataset Demo', annotated)
-        if cv2.waitKey(500) == ord('q'):  # 0.5s delay between samples
+    """Display detections on sample images."""
+    for item in dataset:
+        img = np.array(item["image"])
+        results = model(img, imgsz=640)
+        cv2.imshow("Hugging Face Dataset Demo", results[0].plot())
+        if cv2.waitKey(500) & 0xFF == ord("q"):
             break
     cv2.destroyAllWindows()
 
-# ===== 4. MAIN EXECUTION =====
-if __name__ == "__main__":
-    # Initialize
-    model = initialize_models()
-    hf_dataset = load_hf_dataset()
-    
-    # Choose mode
-    print("Select mode:")
-    print("1 - Hugging Face Dataset Demo")
-    print("2 - Live Drone Detection")
-    
-    choice = input("Enter choice (1/2): ")
-    
-    if choice == "1":
-        run_dataset_demo(model, hf_dataset)
+# ─────────────────────────── 4. MAIN ──────────────────────────────────
+def parse_args():
+    p = argparse.ArgumentParser(description="Autonomous Drone Threat Detection")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--demo", action="store_true", help="Run Hugging Face dataset demo")
+    group.add_argument("--live", action="store_true", help="Run live detection (webcam / drone)")
+    p.add_argument("--drone", action="store_true", help="Use DJI Tello instead of webcam")
+    p.add_argument("--cam", type=str, default="0", help="Webcam index or video file path")
+    p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+    model = initialize_model()
+
+    if args.demo:
+        run_dataset_demo(model, load_hf_dataset())
+    elif args.live:
+        src = "drone" if args.drone else int(args.cam) if args.cam.isdigit() else args.cam
+        run_detection(model, source=src, conf_thresh=args.conf)
     else:
-        run_detection(model, source='drone')
+        # Interactive menu
+        choice = input("Select mode [1=dataset demo, 2=live detection]: ").strip()
+        if choice == "1":
+            run_dataset_demo(model, load_hf_dataset())
+        else:
+            src = "drone" if input("Use DJI Tello? [y/N]: ").lower().startswith("y") else 0
+            run_detection(model, source=src, conf_thresh=args.conf)
+
+if __name__ == "__main__":
+    main()
