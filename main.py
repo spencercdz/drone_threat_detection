@@ -2,11 +2,14 @@
 # Purpose: Detect military targets (tanks, ships, helicopters) in aerial imagery using YOLOv8-OBB
 # Hardware: Works with DJI Tello drone or Raspberry Pi + Pi Camera
 # Dataset: DOTA v2.0 (preprocessed for YOLO-OBB format)
+# Dataset: Hugging Face dataset integration for demo purposes
+
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 from djitellopy import Tello  # For drone control (optional)
+from datasets import load_dataset
 
 # ===== 1. INITIALIZATION =====
 def initialize_models():
@@ -15,7 +18,7 @@ def initialize_models():
     print("[STATUS] Model loaded. Classes:", model.names)
     return model
 
-# ===== 2. REAL-TIME INFERENCE =====
+# ===== 2A. FOR REAL: REAL-TIME INFERENCE =====
 def run_detection(model, source=0, conf_thresh=0.5):
     """
     Run inference on live stream (drone/camera)
@@ -67,18 +70,47 @@ def run_detection(model, source=0, conf_thresh=0.5):
         cap.release()
     cv2.destroyAllWindows()
 
-# ===== 3. DEPLOYMENT ON RASPBERRY PI =====
+# ===== 2B. FOR REAL: DEPLOYMENT ON RASPBERRY PI =====
 def pi_deployment():
     """Optimized version for Raspberry Pi with Pi Camera"""
     model = YOLO('yolov8n-obb.tflite')  # Quantized TensorFlow Lite model
     run_detection(model, source=0, conf_thresh=0.6)  # Higher threshold to reduce false positives
 
+# ===== 3A. FOR DEMO: LOAD HUGGING FACE DATASET =====
+def load_hf_dataset():
+    """Load VisDrone dataset from Hugging Face (aerial military-relevant objects)"""
+    dataset = load_dataset("Voxel51/VisDrone2019-DET", split="train[:50]")  # First 50 samples
+    print(f"[STATUS] Loaded {len(dataset)} samples from VisDrone")
+    return dataset
+
+# ===== 3B. DATASET DEMO MODE =====
+def run_dataset_demo(model, dataset):
+    """Run detection on Hugging Face dataset samples"""
+    for sample in dataset:
+        image = np.array(sample['image'])
+        results = model(image, imgsz=640)
+        
+        # Visualize with annotations
+        annotated = results[0].plot()
+        cv2.imshow('Hugging Face Dataset Demo', annotated)
+        if cv2.waitKey(500) == ord('q'):  # 0.5s delay between samples
+            break
+    cv2.destroyAllWindows()
+
 # ===== 4. MAIN EXECUTION =====
 if __name__ == "__main__":
-    # Initialize model (choose one)
+    # Initialize
     model = initialize_models()
+    hf_dataset = load_hf_dataset()
     
-    # Run detection (choose source)
-    run_detection(model, source='drone')  # For DJI Tello
-    # run_detection(model, source='test.mp4')  # For video file
-    # pi_deployment()  # For Raspberry Pi
+    # Choose mode
+    print("Select mode:")
+    print("1 - Hugging Face Dataset Demo")
+    print("2 - Live Drone Detection")
+    
+    choice = input("Enter choice (1/2): ")
+    
+    if choice == "1":
+        run_dataset_demo(model, hf_dataset)
+    else:
+        run_detection(model, source='drone')

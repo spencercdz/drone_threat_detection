@@ -1,0 +1,4 @@
+ultralytics==8.0.0
+opencv-python==4.5.5.64
+djitellopy==2.5.0
+numpy==1.23.5
