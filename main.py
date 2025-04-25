@@ -1,146 +1,149 @@
 #!/usr/bin/env python3
-# ===== AUTONOMOUS DRONE THREAT DETECTION =====
+# ===== AUTONOMOUS DRONE THREAT DETECTION (VisDrone-ready) =====
 # Purpose : Detect potential military targets (tanks, ships, helicopters) in aerial imagery.
-# Hardware: DJI Tello drone *or* any OpenCV-compatible camera (e.g., Raspberry Pi Cam).
-# Dataset : DOTA v2.0 (model pre-trained), VisDrone sample for quick demo.
-# Notes   : Uses YOLOv8-OBB (oriented bounding boxes) from Ultralytics.
+# Dataset : VisDrone2019-DET (local or Hugging Face subset).
+#           Format: <bbox_left>,<bbox_top>,<bbox_w>,<bbox_h>,...,<class>
+# Hardware: DJI Tello drone *or* any OpenCV camera.
+# Author  : Updated 25 Apr 2025.
 
-import argparse
-import sys
-import cv2
-import numpy as np
+import argparse, sys, cv2, numpy as np
+from pathlib import Path
 from ultralytics import YOLO
 from datasets import load_dataset
+from ultralytics.utils.downloads import download  # only if auto-download desired
 
-# Tello is optional; import lazily so the script also works without the SDK installed.
 try:
     from djitellopy import Tello
 except ImportError:
     Tello = None
 
-# ───────────────────────── 1. INITIALIZATION ──────────────────────────
+# ───────────────────────── 1. INITIALISATION ──────────────────────────
 def initialize_model(weights="yolov8n-obb.pt"):
-    """Load a pre-trained YOLOv8-OBB model."""
     model = YOLO(weights)
     print(f"[STATUS] Model loaded ({weights}). Classes: {model.names}")
     return model
 
-# ──────────────────────── 2A. REAL-TIME INFERENCE ─────────────────────
-def run_detection(model, source=0, conf_thresh=0.5):
+# ─────────────────── 2. VISDRONE DATASET HANDLING ─────────────────────
+def ensure_visdrone_dataset(root="datasets/VisDrone"):
+    root = Path(root)
+    if root.exists():
+        return root
+    print("[INFO] VisDrone folder not found – downloading (~2.3 GB)…")
+    url = "https://github.com/VisDrone/VisDrone-Dataset/releases/download/v1.0/VisDrone2019-DET.zip"
+    download(url, dir=root.parent)        # Ultralytics helper
+    return root
+
+def load_visdrone_local(root="datasets/VisDrone",
+                        split="train",
+                        max_samples=50):
     """
-    Perform live inference.
-    Args:
-        model       : YOLOv8-OBB model.
-        source      : 0 / cam path / 'drone'.
-        conf_thresh : Confidence threshold (0–1).
+    Walk VisDrone directory and yield (image, annotation) tuples.
     """
-    # Choose video source
+    root = ensure_visdrone_dataset(root)
+    img_dir = root / f"VisDrone2019-DET-{split}/images"
+    ann_dir = root / f"VisDrone2019-DET-{split}/annotations"
+    if not img_dir.exists():
+        raise FileNotFoundError(f"Expected {img_dir}")
+
+    img_paths = sorted(img_dir.glob("*.jpg"))
+    if max_samples > 0:
+        img_paths = img_paths[:max_samples]
+    samples = []
+    for p in img_paths:
+        ann = ann_dir / f"{p.stem}.txt"
+        samples.append((str(p), str(ann)))
+    print(f"[STATUS] Loaded {len(samples)} VisDrone {split} samples from {root}")
+    return samples
+
+# ─────────────────────── 3. VISUAL DEMO LOOPS ────────────────────────
+def run_local_demo(model, dataset):
+    """
+    dataset: list of (img_path, ann_path)
+    """
+    for img_p, _ in dataset:
+        image = cv2.imread(img_p)
+        if image is None:
+            continue
+        results = model(image, imgsz=640)
+        cv2.imshow("VisDrone Local Demo", results[0].plot())
+        if cv2.waitKey(500) & 0xFF == ord("q"):
+            break
+    cv2.destroyAllWindows()
+
+def load_hf_dataset(n=50):
+    ds = load_dataset("Voxel51/VisDrone2019-DET", split=f"train[:{n}]")
+    print(f"[STATUS] Hugging Face split loaded: {len(ds)} images")
+    return ds
+
+def run_hf_demo(model, hf_ds):
+    for rec in hf_ds:
+        img = np.array(rec["image"])
+        cv2.imshow("VisDrone HF Demo", model(img, imgsz=640)[0].plot())
+        if cv2.waitKey(500) & 0xFF == ord("q"):
+            break
+    cv2.destroyAllWindows()
+
+# ───────────────────────── 4. LIVE DETECTION ─────────────────────────
+def run_detection(model, source=0, conf=0.5):
     drone = None
     if source == "drone":
         if Tello is None:
-            print("ERROR: djitellopy not installed; cannot run drone mode.")
+            print("djitellopy missing.")
             sys.exit(1)
-        drone = Tello()
-        drone.connect()
-        drone.streamon()
-        frame_reader = drone.get_frame_read()
+        drone = Tello(); drone.connect(); drone.streamon()
+        feed = drone.get_frame_read()
     else:
         cap = cv2.VideoCapture(source)
 
     try:
         while True:
-            # Grab frame
-            if source == "drone":
-                frame = frame_reader.frame
-            else:
-                ret, frame = cap.read()
-                if not ret:
-                    print("Stream ended or camera not found.")
-                    break
-
-            # Inference
-            results = model(frame, imgsz=640, conf=conf_thresh, verbose=False)
-
-            # Visualize detections
-            annotated = results[0].plot()
-            for box in results[0].obb:          # oriented bounding boxes
-                cls_id = int(box.cls)
-                label = model.names[cls_id]
-                if label in {"helicopter", "tank"}:        # high-priority
-                    cv2.putText(
-                        annotated,
-                        f"ALERT: {label.upper()}",
-                        (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 0, 255),
-                        2,
-                    )
-
-            cv2.imshow("Drone Threat Detection", annotated)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            frame = feed.frame if source == "drone" else cap.read()[1]
+            if frame is None: break
+            res = model(frame, imgsz=640, conf=conf)
+            img = res[0].plot()
+            for obb in res[0].obb:
+                cls = model.names[int(obb.cls)]
+                if cls in {"helicopter", "tank"}:
+                    cv2.putText(img, f"ALERT: {cls}", (50, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            cv2.imshow("Threat Detection", img)
+            if cv2.waitKey(1) & 0xFF == ord("q"): break
     finally:
-        # Clean up
-        if source == "drone" and drone is not None:
-            drone.streamoff()
-            drone.end()
-        else:
+        if source == "drone" and drone:
+            drone.streamoff(); drone.end()
+        elif source != "drone":
             cap.release()
         cv2.destroyAllWindows()
 
-# ─────────────────────── 2B. RASPBERRY PI SHORTCUT ────────────────────
-def pi_deployment():
-    """One-liner for Raspberry Pi (assuming a quantized TFLite model exists)."""
-    model = initialize_model("yolov8n-obb.tflite")
-    run_detection(model, source=0, conf_thresh=0.6)
-
-# ───────────────────── 3A. HUGGING FACE DATASET DEMO ──────────────────
-def load_hf_dataset(num_samples=50):
-    """Pull a small VisDrone subset for a quick desktop demo."""
-    ds = load_dataset("Voxel51/VisDrone2019-DET", split=f"train[:{num_samples}]")
-    print(f"[STATUS] Loaded {len(ds)} samples from VisDrone")
-    return ds
-
-# ────────────────────── 3B. DATASET DEMO LOOP ─────────────────────────
-def run_dataset_demo(model, dataset):
-    """Display detections on sample images."""
-    for item in dataset:
-        img = np.array(item["image"])
-        results = model(img, imgsz=640)
-        cv2.imshow("Hugging Face Dataset Demo", results[0].plot())
-        if cv2.waitKey(500) & 0xFF == ord("q"):
-            break
-    cv2.destroyAllWindows()
-
-# ─────────────────────────── 4. MAIN ──────────────────────────────────
-def parse_args():
-    p = argparse.ArgumentParser(description="Autonomous Drone Threat Detection")
-    group = p.add_mutually_exclusive_group()
-    group.add_argument("--demo", action="store_true", help="Run Hugging Face dataset demo")
-    group.add_argument("--live", action="store_true", help="Run live detection (webcam / drone)")
+# ───────────────────────────── 5. CLI ────────────────────────────────
+def args():
+    p = argparse.ArgumentParser()
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--demo-hf", action="store_true", help="Run Hugging Face demo")
+    g.add_argument("--demo-local", action="store_true", help="Run local VisDrone demo")
+    g.add_argument("--live", action="store_true", help="Live detection (webcam/drone)")
     p.add_argument("--drone", action="store_true", help="Use DJI Tello instead of webcam")
-    p.add_argument("--cam", type=str, default="0", help="Webcam index or video file path")
+    p.add_argument("--root", default="datasets/VisDrone", help="VisDrone root folder")
+    p.add_argument("--split", default="train", help="VisDrone split (train/val/test-dev)")
+    p.add_argument("--max", type=int, default=50, help="Max samples for local demo (-1 for all)")
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     return p.parse_args()
 
 def main():
-    args = parse_args()
+    opt = args()
     model = initialize_model()
 
-    if args.demo:
-        run_dataset_demo(model, load_hf_dataset())
-    elif args.live:
-        src = "drone" if args.drone else int(args.cam) if args.cam.isdigit() else args.cam
-        run_detection(model, source=src, conf_thresh=args.conf)
+    if opt.demo_hf:
+        run_hf_demo(model, load_hf_dataset())
+    elif opt.demo_local:
+        samples = load_visdrone_local(opt.root, opt.split, opt.max)
+        run_local_demo(model, samples)
+    elif opt.live:
+        src = "drone" if opt.drone else 0
+        run_detection(model, src, opt.conf)
     else:
-        # Interactive menu
-        choice = input("Select mode [1=dataset demo, 2=live detection]: ").strip()
-        if choice == "1":
-            run_dataset_demo(model, load_hf_dataset())
-        else:
-            src = "drone" if input("Use DJI Tello? [y/N]: ").lower().startswith("y") else 0
-            run_detection(model, source=src, conf_thresh=args.conf)
+        print("Choose a mode: --demo-hf  |  --demo-local  |  --live [--drone]")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
