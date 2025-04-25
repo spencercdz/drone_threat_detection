@@ -10,7 +10,7 @@ import argparse, sys, cv2, numpy as np
 from pathlib import Path
 from ultralytics import YOLO
 from datasets import load_dataset
-from ultralytics.utils.downloads import download  # only if auto-download desired
+from ultralytics.utils.downloads import download
 
 try:
     from djitellopy import Tello
